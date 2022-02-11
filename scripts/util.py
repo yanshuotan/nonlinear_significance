@@ -1,4 +1,9 @@
 import numpy as np
+from collections import defaultdict
+
+from sklearn.base import TransformerMixin, BaseEstimator
+from sklearn.decomposition import PCA
+from sklearn.ensemble import BaseEnsemble
 
 
 def compare(query, feature, threshold, sign=True):
@@ -26,7 +31,7 @@ class LocalDecisionStump:
                                                                   self.a_thresholds,
                                                                   self.a_signs)])
         if not in_node:
-            return 0
+            return 0.0
         else:
             is_right = compare(query, self.feature, self.threshold)
             if is_right:
@@ -39,7 +44,6 @@ class LocalDecisionStump:
         return f"LocalDecisionStump(feature={self.feature}, threshold={self.threshold}, left_val={self.left_val}, " \
                f"right_val={self.right_val}, a_features={self.a_features}, a_thresholds={self.a_thresholds}, " \
                f"a_signs={self.a_signs})"
-
 
 
 def make_stump(node_no, tree_struct, parent_stump, is_right_child, normalize=False):
@@ -103,3 +107,57 @@ def make_stumps(tree_struct, normalize=False):
     make_stump_iter(0, tree_struct, None, None, normalize, stumps)
 
     return stumps
+
+
+def tree_feature_transform(stumps, X):
+    transformed_feature_vectors = []
+    for stump in stumps:
+        transformed_feature_vec = np.apply_along_axis(stump, 1, X)
+        transformed_feature_vectors.append(transformed_feature_vec)
+
+    return np.vstack(transformed_feature_vectors).T
+
+
+class TreeTransformer(TransformerMixin, BaseEstimator):
+
+    def __init__(self, estimator, max_components=np.inf, normalize=True):
+        self.estimator = estimator
+        self.max_components = max_components
+        self.normalize = normalize
+        if isinstance(estimator, BaseEnsemble):
+            self.all_stumps = []
+            for tree_model in estimator.estimators_:
+                self.all_stumps += make_stumps(tree_model.tree_, normalize)
+        else:
+            self.all_stumps = make_stumps(estimator.tree_, normalize)
+        self.original_feat_to_stump_mapping = defaultdict(list)
+        for idx, stump in enumerate(self.all_stumps):
+            self.original_feat_to_stump_mapping[stump.feature].append(idx)
+        self.pca_transformers = defaultdict(lambda: None)
+        self.original_feat_to_transformed_mapping = defaultdict(list)
+
+
+    def fit(self, X, y=None):
+        counter = 0
+        for k, v in self.original_feat_to_stump_mapping.items():
+            restricted_stumps = [self.all_stumps[idx] for idx in v]
+            transformed_feature_vectors = tree_feature_transform(restricted_stumps, X)
+            n_stumps_for_k = transformed_feature_vectors.shape[1]
+            if n_stumps_for_k > self.max_components:
+                self.pca_transformers[k] = PCA(n_components=self.max_components)
+                self.pca_transformers[k].fit(transformed_feature_vectors)
+
+            n_new_feats_for_k = min(self.max_components, n_stumps_for_k)
+            self.original_feat_to_transformed_mapping[k] = np.arange(counter, counter + n_new_feats_for_k)
+            counter += n_new_feats_for_k
+
+    def transform(self, X):
+        transformed_feature_vectors_sets = []
+        for k, v in self.original_feat_to_stump_mapping.items():
+            restricted_stumps = [self.all_stumps[idx] for idx in v]
+            transformed_feature_vectors = tree_feature_transform(restricted_stumps, X)
+            if self.pca_transformers[k] is not None:
+                transformed_feature_vectors = self.pca_transformers[k].transform(transformed_feature_vectors)
+            transformed_feature_vectors_sets.append(transformed_feature_vectors)
+
+        return np.hstack(transformed_feature_vectors_sets)
